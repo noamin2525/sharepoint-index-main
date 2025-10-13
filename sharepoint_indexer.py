@@ -4,7 +4,7 @@ from urllib.parse import quote, unquote
 import json
 from flask import Flask, render_template_string, send_file, jsonify, request, redirect
 import io
-
+from urllib.parse import quote
 app = Flask(__name__)
 
 
@@ -439,11 +439,12 @@ def list_files() :
                     'modified' : item['lastModifiedDateTime']
                 })
             elif 'file' in item :
+                download_link = "https://link-phi-smoky.vercel.app/api?url="+"https://5c8hk2.sharepoint.com/sites/movies/_layouts/15/stream.aspx?id=/sites/movies/Shared Documents/" +item['parentReference']['path'].split('/root:/')[-1] +"/"+item['name']
                 result['files'].append({
                     'name' : item['name'],
                     'id' : item['id'],
                     'size' : item['size'],
-                    'download_url' : item.get('@microsoft.graph.downloadUrl', ''),
+                    'download_url' : download_link,
                     'created' : item['createdDateTime'],
                     'modified' : item['lastModifiedDateTime']
                 })
