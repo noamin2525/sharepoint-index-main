@@ -131,7 +131,8 @@ HTML_TEMPLATE = """
 
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            /* background is provided by the site background include (static/css/background.css + SVG) */
+            background: none;
             min-height: 100vh;
             padding: 20px;
         }
@@ -287,9 +288,13 @@ HTML_TEMPLATE = """
             100% { transform: rotate(360deg); }
         }
     </style>
+    </style>
+    <!-- Link the project background CSS (served from static/) -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/background.css') }}">
 </head>
 <body>
-    <div class="container">
+    {% include '_background.html' %}
+    <div class="container site-main-content">
         <div class="header">
             <h1>📁 SharePoint File Browser</h1>
             <p>Browse and download your files</p>
