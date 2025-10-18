@@ -2,7 +2,7 @@ import requests
 import os
 from urllib.parse import quote, unquote
 import json
-from flask import Flask, render_template_string, send_file, jsonify, request, redirect
+from flask import Flask, render_template_string, send_file, jsonify, request, redirect, Response, stream_with_context
 import io
 from urllib.parse import quote
 app = Flask(__name__)
@@ -106,6 +106,11 @@ class SharePointIndexer :
 
         drive_id = self.get_drive_id()
         url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{drive_id}/items/{file_id}/content"
+
+        # allow caller to pass through extra headers (eg Range)
+        extra_headers = getattr(self, '_extra_headers', None)
+        if extra_headers:
+            headers.update(extra_headers)
 
         response = requests.get(url, headers=headers, stream=True)
         response.raise_for_status()
@@ -374,6 +379,9 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="item-actions">
                             <a href="${file.download_url}" class="btn btn-primary" download>Download</a>
+                            <a href="${file.stream_url}" class="btn btn-secondary" target="_blank">Stream</a>
+                            <a href="${file.strm_url}" class="btn btn-secondary" target="_blank">.strm</a>
+                            <a href="${file.m3u_url}" class="btn btn-secondary" target="_blank">.m3u</a>
                         </div>
                     `;
                     itemList.appendChild(li);
@@ -439,12 +447,23 @@ def list_files() :
                     'modified' : item['lastModifiedDateTime']
                 })
             elif 'file' in item :
-                download_link = "https://sherpoint-link.vercel.app/api?url="+"https://5c8hk2.sharepoint.com/sites/movies/_layouts/15/stream.aspx?id=/sites/movies/Shared Documents/" +item['parentReference']['path'].split('/root:/')[-1] +"/"+item['name']
+                # Construct local endpoints for download and streaming
+                # /download?file_id=...&filename=...
+                local_download = f"/download?file_id={item['id']}&filename={quote(item['name'])}"
+                local_stream = f"/stream?file_id={item['id']}&filename={quote(item['name'])}"
+                # .strm file (Stremio accepts simple URLs or .strm files containing the direct link)
+                local_strm = f"/strm?file_id={item['id']}&filename={quote(item['name'])}"
+                # .m3u entry for IPTV VOD (can be downloaded and used in IPTV players)
+                local_m3u = f"/m3u?file_id={item['id']}&filename={quote(item['name'])}"
+
                 result['files'].append({
                     'name' : item['name'],
                     'id' : item['id'],
                     'size' : item['size'],
-                    'download_url' : download_link,
+                    'download_url' : local_download,
+                    'stream_url' : local_stream,
+                    'strm_url' : local_strm,
+                    'm3u_url' : local_m3u,
                     'created' : item['createdDateTime'],
                     'modified' : item['lastModifiedDateTime']
                 })
@@ -477,6 +496,85 @@ def download_file() :
     except Exception as e :
         print(f"Download error: {str(e)}")
         return f"Error downloading file: {str(e)}", 500
+
+
+@app.route('/stream')
+def stream_file():
+    """Stream file proxy that supports Range requests for seeking (use in VLC/IPTV players)."""
+    try:
+        file_id = request.args.get('file_id')
+        filename = request.args.get('filename', 'stream')
+
+        if not file_id:
+            return "Missing file_id parameter", 400
+
+        # Forward Range and other headers that help with streaming
+        extra_headers = {}
+        range_header = request.headers.get('Range')
+        if range_header:
+            extra_headers['Range'] = range_header
+
+        # Attach extra headers to indexer temporarily
+        indexer._extra_headers = extra_headers
+        resp = indexer.download_file_stream(file_id)
+        # Clean up
+        indexer._extra_headers = None
+
+        # Build response streaming generator
+        def generate():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+        # Pass through status code (206 if range requested and honored)
+        status = resp.status_code
+
+        headers = {}
+        # Copy relevant headers
+        for h in ['Content-Type', 'Content-Range', 'Content-Length', 'Accept-Ranges', 'Content-Disposition']:
+            if h in resp.headers:
+                headers[h] = resp.headers[h]
+
+        # Ensure attachment filename isn't forced; let player handle
+        headers['Content-Disposition'] = f'inline; filename="{filename}"'
+
+        return Response(stream_with_context(generate()), status=status, headers=headers)
+
+    except Exception as e:
+        print(f"Stream error: {e}")
+        return f"Error streaming file: {str(e)}", 500
+
+
+@app.route('/strm')
+def serve_strm():
+    """Serve a .strm file that points to the /stream endpoint. Useful for Stremio or clients that accept .strm files."""
+    file_id = request.args.get('file_id')
+    filename = request.args.get('filename', 'stream')
+    if not file_id:
+        return "Missing file_id parameter", 400
+
+    stream_url = request.url_root.rstrip('/') + f"/stream?file_id={file_id}&filename={quote(filename)}"
+    content = stream_url
+    resp = Response(content, mimetype='video/x-matroska')
+    # Make browser download with .strm filename
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}.strm"'
+    return resp
+
+
+@app.route('/m3u')
+def serve_m3u():
+    """Serve a tiny M3U playlist entry pointing to the /stream endpoint for IPTV VOD players."""
+    file_id = request.args.get('file_id')
+    filename = request.args.get('filename', 'stream')
+    if not file_id:
+        return "Missing file_id parameter", 400
+
+    stream_url = request.url_root.rstrip('/') + f"/stream?file_id={file_id}&filename={quote(filename)}"
+    # Basic M3U with a single entry
+    m3u = f"#EXTM3U\n#EXTINF:-1,{filename}\n{stream_url}\n"
+    resp = Response(m3u, mimetype='application/x-mpegurl')
+    resp.headers['Content-Disposition'] = f'attachment; filename="{filename}.m3u"'
+    return resp
 
 
 if __name__ == '__main__':
