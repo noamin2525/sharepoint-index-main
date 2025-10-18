@@ -117,6 +117,23 @@ class SharePointIndexer :
 
         return response
 
+    def get_download_url(self, file_id):
+        """Retrieve the pre-authenticated download URL from Microsoft Graph for the item."""
+        headers = {
+            'Authorization': f'Bearer {self.access_token}',
+            'Accept': 'application/json'
+        }
+
+        drive_id = self.get_drive_id()
+        url = f"https://graph.microsoft.com/v1.0/sites/{self.site_id}/drives/{drive_id}/items/{file_id}"
+        params = {
+            '$select': '@microsoft.graph.downloadUrl'
+        }
+        response = requests.get(url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json()
+        return data.get('@microsoft.graph.downloadUrl')
+
 
 # Initialize indexer
 indexer = SharePointIndexer()
@@ -508,37 +525,15 @@ def stream_file():
         if not file_id:
             return "Missing file_id parameter", 400
 
-        # Forward Range and other headers that help with streaming
-        extra_headers = {}
-        range_header = request.headers.get('Range')
-        if range_header:
-            extra_headers['Range'] = range_header
+        # Rather than proxying the full media through the serverless function (which can fail),
+        # obtain the direct pre-authenticated download URL from Graph and redirect the client to it.
+        # This allows VLC and IPTV players to perform Range requests directly against SharePoint's URL.
+        download_url = indexer.get_download_url(file_id)
+        if not download_url:
+            return "Could not retrieve download URL", 500
 
-        # Attach extra headers to indexer temporarily
-        indexer._extra_headers = extra_headers
-        resp = indexer.download_file_stream(file_id)
-        # Clean up
-        indexer._extra_headers = None
-
-        # Build response streaming generator
-        def generate():
-            for chunk in resp.iter_content(chunk_size=8192):
-                if chunk:
-                    yield chunk
-
-        # Pass through status code (206 if range requested and honored)
-        status = resp.status_code
-
-        headers = {}
-        # Copy relevant headers
-        for h in ['Content-Type', 'Content-Range', 'Content-Length', 'Accept-Ranges', 'Content-Disposition']:
-            if h in resp.headers:
-                headers[h] = resp.headers[h]
-
-        # Ensure attachment filename isn't forced; let player handle
-        headers['Content-Disposition'] = f'inline; filename="{filename}"'
-
-        return Response(stream_with_context(generate()), status=status, headers=headers)
+        # Redirect client to the direct URL
+        return redirect(download_url)
 
     except Exception as e:
         print(f"Stream error: {e}")
@@ -553,10 +548,13 @@ def serve_strm():
     if not file_id:
         return "Missing file_id parameter", 400
 
-    stream_url = request.url_root.rstrip('/') + f"/stream?file_id={file_id}&filename={quote(filename)}"
-    content = stream_url
-    resp = Response(content, mimetype='video/x-matroska')
-    # Make browser download with .strm filename
+    # Provide a .strm file that points directly to the Graph download URL
+    download_url = indexer.get_download_url(file_id)
+    if not download_url:
+        return "Could not retrieve download URL", 500
+
+    content = download_url
+    resp = Response(content, mimetype='application/x-mpegURL')
     resp.headers['Content-Disposition'] = f'attachment; filename="{filename}.strm"'
     return resp
 
@@ -569,9 +567,12 @@ def serve_m3u():
     if not file_id:
         return "Missing file_id parameter", 400
 
-    stream_url = request.url_root.rstrip('/') + f"/stream?file_id={file_id}&filename={quote(filename)}"
-    # Basic M3U with a single entry
-    m3u = f"#EXTM3U\n#EXTINF:-1,{filename}\n{stream_url}\n"
+    download_url = indexer.get_download_url(file_id)
+    if not download_url:
+        return "Could not retrieve download URL", 500
+
+    # Basic M3U with a single entry pointing to the direct download URL
+    m3u = f"#EXTM3U\n#EXTINF:-1,{filename}\n{download_url}\n"
     resp = Response(m3u, mimetype='application/x-mpegurl')
     resp.headers['Content-Disposition'] = f'attachment; filename="{filename}.m3u"'
     return resp
