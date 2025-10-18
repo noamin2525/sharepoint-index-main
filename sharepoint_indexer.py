@@ -397,6 +397,7 @@ HTML_TEMPLATE = """
                         <div class="item-actions">
                             <a href="${file.download_url}" class="btn btn-primary" download>Download</a>
                             <a href="${file.stream_range_url}" class="btn btn-secondary" target="_blank">Stream (fast)</a>
+                            <a href="${file.proxy_stream_url}" class="btn btn-secondary" target="_blank">Stream (proxy)</a>
                             <a href="${file.strm_url}" class="btn btn-secondary" target="_blank">.strm</a>
                             <a href="${file.m3u_url}" class="btn btn-secondary" target="_blank">.m3u</a>
                         </div>
@@ -469,6 +470,7 @@ def list_files() :
                 local_download = f"/download?file_id={item['id']}&filename={quote(item['name'])}"
                 local_stream = f"/stream?file_id={item['id']}&filename={quote(item['name'])}"
                 local_stream_range = f"/stream_range?file_id={item['id']}&filename={quote(item['name'])}"
+                local_proxy_stream = f"/proxy_stream?file_id={item['id']}&filename={quote(item['name'])}"
                 # .strm file (Stremio accepts simple URLs or .strm files containing the direct link)
                 local_strm = f"/strm?file_id={item['id']}&filename={quote(item['name'])}"
                 # .m3u entry for IPTV VOD (can be downloaded and used in IPTV players)
@@ -483,6 +485,7 @@ def list_files() :
                     'direct_url': indexer.get_download_url(item['id']) if indexer.access_token else None,
                     'stream_url' : local_stream,
                     'stream_range_url': local_stream_range,
+                    'proxy_stream_url': local_proxy_stream,
                     'strm_url' : local_strm,
                     'm3u_url' : local_m3u,
                     'created' : item['createdDateTime'],
@@ -654,6 +657,57 @@ def stream_range():
     except Exception as e:
         print(f"stream_range error: {e}")
         return f"Error streaming range: {e}", 500
+
+
+@app.route('/proxy_stream')
+def proxy_stream():
+    """Full proxy: fetch the direct download URL and stream it back to the client, forwarding Range if present.
+    Use this only if direct or range methods fail; it uses server resources and may hit serverless limits.
+    """
+    file_id = request.args.get('file_id')
+    filename = request.args.get('filename', 'stream')
+
+    if not file_id:
+        return "Missing file_id", 400
+
+    try:
+        if not indexer.access_token:
+            indexer.get_access_token()
+            indexer.get_site_id()
+            indexer.get_drive_id()
+
+        download_url = indexer.get_download_url(file_id)
+        if not download_url:
+            return "Could not retrieve download URL", 500
+
+        headers = {}
+        # forward Range header if present
+        range_header = request.headers.get('Range')
+        if range_header:
+            headers['Range'] = range_header
+
+        # Stream from the direct URL
+        resp = requests.get(download_url, headers=headers, stream=True)
+        resp.raise_for_status()
+
+        def generate():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+        status = resp.status_code
+        out_headers = {}
+        for h in ['Content-Type', 'Content-Range', 'Content-Length', 'Accept-Ranges']:
+            if h in resp.headers:
+                out_headers[h] = resp.headers[h]
+
+        out_headers['Content-Disposition'] = f'inline; filename="{filename}"'
+
+        return Response(stream_with_context(generate()), status=status, headers=out_headers)
+
+    except Exception as e:
+        print(f"proxy_stream error: {e}")
+        return f"Error proxying stream: {e}", 500
 
 
 if __name__ == '__main__':
