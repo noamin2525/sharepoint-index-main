@@ -478,6 +478,8 @@ def list_files() :
                     'id' : item['id'],
                     'size' : item['size'],
                     'download_url' : local_download,
+                    # direct URL returned by Microsoft Graph (pre-authenticated temporary link)
+                    'direct_url': indexer.get_download_url(item['id']) if indexer.access_token else None,
                     'stream_url' : local_stream,
                     'strm_url' : local_strm,
                     'm3u_url' : local_m3u,
@@ -576,6 +578,28 @@ def serve_m3u():
     resp = Response(m3u, mimetype='application/x-mpegurl')
     resp.headers['Content-Disposition'] = f'attachment; filename="{filename}.m3u"'
     return resp
+
+
+@app.route('/direct')
+def get_direct():
+    """Return the Microsoft Graph direct download URL for a given file_id as JSON."""
+    file_id = request.args.get('file_id')
+    if not file_id:
+        return jsonify({'error': 'missing file_id'}), 400
+
+    try:
+        if not indexer.access_token:
+            indexer.get_access_token()
+            indexer.get_site_id()
+            indexer.get_drive_id()
+
+        download_url = indexer.get_download_url(file_id)
+        if not download_url:
+            return jsonify({'error': 'could not retrieve download url'}), 500
+
+        return jsonify({'direct_url': download_url})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 if __name__ == '__main__':
