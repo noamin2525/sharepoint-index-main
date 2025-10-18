@@ -396,7 +396,7 @@ HTML_TEMPLATE = """
                         </div>
                         <div class="item-actions">
                             <a href="${file.download_url}" class="btn btn-primary" download>Download</a>
-                            <a href="${file.stream_url}" class="btn btn-secondary" target="_blank">Stream</a>
+                            <a href="${file.stream_range_url}" class="btn btn-secondary" target="_blank">Stream (fast)</a>
                             <a href="${file.strm_url}" class="btn btn-secondary" target="_blank">.strm</a>
                             <a href="${file.m3u_url}" class="btn btn-secondary" target="_blank">.m3u</a>
                         </div>
@@ -468,6 +468,7 @@ def list_files() :
                 # /download?file_id=...&filename=...
                 local_download = f"/download?file_id={item['id']}&filename={quote(item['name'])}"
                 local_stream = f"/stream?file_id={item['id']}&filename={quote(item['name'])}"
+                local_stream_range = f"/stream_range?file_id={item['id']}&filename={quote(item['name'])}"
                 # .strm file (Stremio accepts simple URLs or .strm files containing the direct link)
                 local_strm = f"/strm?file_id={item['id']}&filename={quote(item['name'])}"
                 # .m3u entry for IPTV VOD (can be downloaded and used in IPTV players)
@@ -481,6 +482,7 @@ def list_files() :
                     # direct URL returned by Microsoft Graph (pre-authenticated temporary link)
                     'direct_url': indexer.get_download_url(item['id']) if indexer.access_token else None,
                     'stream_url' : local_stream,
+                    'stream_range_url': local_stream_range,
                     'strm_url' : local_strm,
                     'm3u_url' : local_m3u,
                     'created' : item['createdDateTime'],
@@ -600,6 +602,58 @@ def get_direct():
         return jsonify({'direct_url': download_url})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/stream_range')
+def stream_range():
+    """Proxy Range requests only. If client sends a Range header, forward it to Graph and stream back.
+    If no Range header is present, redirect to direct download URL to avoid transferring whole file via serverless.
+    """
+    file_id = request.args.get('file_id')
+    filename = request.args.get('filename', 'stream')
+
+    if not file_id:
+        return "Missing file_id", 400
+
+    try:
+        # Ensure tokens are ready
+        if not indexer.access_token:
+            indexer.get_access_token()
+            indexer.get_site_id()
+            indexer.get_drive_id()
+
+        range_header = request.headers.get('Range')
+        if not range_header:
+            # No Range header -> redirect to direct URL (client will download/stream directly)
+            download_url = indexer.get_download_url(file_id)
+            if not download_url:
+                return "Could not retrieve download URL", 500
+            return redirect(download_url)
+
+        # Forward Range header to Graph download endpoint
+        indexer._extra_headers = {'Range': range_header}
+        resp = indexer.download_file_stream(file_id)
+        indexer._extra_headers = None
+
+        # Stream response back to client
+        def generate():
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    yield chunk
+
+        status = resp.status_code
+        headers = {}
+        for h in ['Content-Type', 'Content-Range', 'Content-Length', 'Accept-Ranges']:
+            if h in resp.headers:
+                headers[h] = resp.headers[h]
+
+        headers['Content-Disposition'] = f'inline; filename="{filename}"'
+
+        return Response(stream_with_context(generate()), status=status, headers=headers)
+
+    except Exception as e:
+        print(f"stream_range error: {e}")
+        return f"Error streaming range: {e}", 500
 
 
 if __name__ == '__main__':
